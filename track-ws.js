@@ -16,6 +16,7 @@ const { ethers } = require("ethers");
 const { queueAlert, listen, escapeHtml } = require("./lib/bot");
 const { Rpc, parseUrls } = require("./lib/rpc");
 const { loadJson, saveJson } = require("./lib/store");
+const blockscout = require("./lib/blockscout"); // nguồn log dự phòng độc lập (REST)
 
 const WALLET = "0x3d58E42d3a920dE4C1F71EE041c7eBb82ee23f49";
 const PONS = "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e"; // PonsV2LaunchFactory
@@ -23,6 +24,8 @@ const POLL_MS = 5000;
 const CONFIRMATIONS = Number(process.env.CONFIRMATIONS || 5); // #5
 const WS_STATE = "./ws_cursor.txt"; // #2 con trỏ block
 const TOKENS_FILE = "./ws_tokens.json"; // #10 lịch sử token đã bắt
+const ADAPTERS_FILE = "./ws_adapters.json"; // lưu adapter đã biết -> khỏi re-scan toàn lịch sử mỗi lần khởi động
+const SPLIT_BUDGET = Number(process.env.LOG_SPLIT_BUDGET || 4000); // trần số call khi chia nhỏ getLogs (chặn RPC giới hạn range quá chặt)
 const HEARTBEAT_MS = Number(process.env.HEARTBEAT_HOURS || 6) * 3600 * 1000;
 const ERR_THRESHOLD = Number(process.env.ERROR_ALERT_THRESHOLD || 3);
 
@@ -60,6 +63,7 @@ const status = {
   lastErrorAt: null,
   lastHeartbeatAt: Date.now(),
   downAlerted: false,
+  onFallback: false, // đang chạy qua Blockscout dự phòng (mọi RPC chết) hay không
 };
 
 function ago(ts) {
@@ -80,20 +84,79 @@ async function liveProbe() {
   try {
     const blk = await rpc.getBlockNumber(onRotate);
     status.rpc = rpc.current;
-    return { ok: true, ms: Date.now() - t0, chainBlock: blk, rpc: rpc.current };
-  } catch (e) { return { ok: false, ms: Date.now() - t0, err: e.message }; }
+    return { ok: true, ms: Date.now() - t0, chainBlock: blk, rpc: rpc.current, src: "RPC" };
+  } catch (e) {
+    // RPC chết -> thử Blockscout (nguồn dự phòng) để /health phản ánh ĐÚNG là vẫn đang chạy được
+    try {
+      const blk = await blockscout.latestBlock();
+      return { ok: true, ms: Date.now() - t0, chainBlock: blk, rpc: "Blockscout (dự phòng)", src: "Blockscout" };
+    } catch (e2) { return { ok: false, ms: Date.now() - t0, err: e.message }; }
+  }
 }
 
-// getLogs "thích nghi" + failover: rpc.call thử mọi RPC; range lỗi thì chia đôi (#8)
+// Nhận diện lỗi "range/kết quả quá lớn" (đáng chia đôi) vs lỗi mạng/tạm (đừng chia).
+// Bắt theo NỘI DUNG message nên tự nhiên: "exceed maximum block range" -> chia;
+// "specify an address" / ECONNREFUSED / timeout -> KHÔNG chia (ném để failover xử lý).
+function isRangeError(e) {
+  const m = String(
+    (e && (e.error?.message || e.info?.error?.message || e.shortMessage || e.message)) || ""
+  ).toLowerCase();
+  // Rate-limit/throttle KHÔNG phải range -> đừng chia đôi (tránh dội bom RPC đang bị siết).
+  if (/rate.?limit|compute unit|too many request|throttl|quota|capacity|429/.test(m)) return false;
+  // Chỉ chia đôi khi RPC báo range/kết quả quá lớn (chia đôi mới có ích).
+  return /block range|range is too|out of range|exceed.{0,20}range|10 block range|too many (results|logs)|more than \d+ results|query returned more|result set|response size|max(imum)? results|payload too large|log.{0,20}limit/.test(m);
+}
+
+// getLogs qua RPC (mọi endpoint failover). Thử nguyên range trước (RPC như official nhận
+// cả 45M block/1 call); CHỈ chia đôi khi RPC báo range/kết quả quá lớn (#8). Lỗi mạng/tạm
+// -> NÉM ngay: đây là FIX bug treo âm thầm — trước đây MỌI lỗi đều chia đôi nên khi mọi RPC
+// chết lúc khởi động (nạp 0..tip) đệ quy bùng nổ, treo cứng. Ngân sách SPLIT_BUDGET chặn
+// trường hợp RPC giới hạn range quá chặt (vd Alchemy free 10 block) trên range khổng lồ ->
+// ném để getLogs() rơi xuống Blockscout thay vì chia hàng triệu lần.
 async function getLogsAdaptive(filter, from, to) {
+  return splitLogs(filter, from, to, 0, { n: 0 });
+}
+async function splitLogs(filter, from, to, depth, budget) {
+  if (++budget.n > SPLIT_BUDGET) throw new Error(`getLogs: vượt ngân sách chia nhỏ ${SPLIT_BUDGET} call (RPC giới hạn range quá chặt cho khoảng ${from}-${to})`);
   try {
     return await rpc.call((p) => p.getLogs({ ...filter, fromBlock: from, toBlock: to }), onRotate);
   } catch (e) {
-    if (to <= from) throw e;
+    if (!isRangeError(e) || to <= from || depth >= 40) throw e;
     const mid = Math.floor((from + to) / 2);
-    const left = await getLogsAdaptive(filter, from, mid);
-    const right = await getLogsAdaptive(filter, mid + 1, to);
+    const left = await splitLogs(filter, from, mid, depth + 1, budget);
+    const right = await splitLogs(filter, mid + 1, to, depth + 1, budget);
     return left.concat(right);
+  }
+}
+
+// Nguồn log HỢP NHẤT: thử mọi RPC trước; nếu RPC hỏng hẳn thì rơi xuống Blockscout REST
+// (hạ tầng ĐỘC LẬP) để không "mù" khi official + tenderly cùng chết. Cả hai chết -> ném để
+// vòng poll đếm lỗi. Việc báo 🟡/🟢 do vòng poll làm theo CHU KỲ (dựa trên bsUseCount) để
+// tránh flap khi query adapter (address-less) và query launch (có address) thành/bại lệch nhau.
+let bsUseCount = 0; // tăng mỗi lần PHẢI dùng Blockscout (getLogs/getTip)
+async function getLogs(filter, from, to) {
+  try {
+    return await getLogsAdaptive(filter, from, to);
+  } catch (e) {
+    try {
+      const logs = await blockscout.getLogs(filter, from, to);
+      bsUseCount++;
+      return logs;
+    } catch (e2) {
+      throw new Error(`RPC lỗi (${e.message}) VÀ Blockscout lỗi (${e2.message})`);
+    }
+  }
+}
+
+// Lấy block mới nhất: thử RPC trước; RPC hỏng hẳn -> Blockscout REST. Nhờ vậy tracker CHẠY ĐƯỢC
+// cả khi KHÔNG có RPC nào sống (Blockscout gánh). Ném nếu cả hai chết (vòng poll đếm lỗi -> 🔴).
+async function getTip() {
+  try {
+    return await rpc.getBlockNumber(onRotate);
+  } catch (e) {
+    const b = await blockscout.latestBlock(); // ném nếu Blockscout cũng chết
+    bsUseCount++;
+    return b;
   }
 }
 
@@ -138,7 +201,7 @@ async function onCommand(cmd, args) {
         `${verdict}  (tracker ${status.mode})`,
         `Uptime: ${uptime()}`,
         `RPC: ${status.rpc} (${status.rpcCount} endpoint, xoay ${rpc.rotations} lần)`,
-        `${srcOk ? "🟢" : "🔴"} Nguồn dữ liệu (RPC): ${srcOk ? `OK ${p.ms}ms` : `LỖI (${p.err || "?"})`}`,
+        `${srcOk ? "🟢" : "🔴"} Nguồn dữ liệu (${p.src || "RPC"}): ${srcOk ? `OK ${p.ms}ms` : `LỖI (${p.err || "?"})`}`,
         `${errOk ? "🟢" : "🔴"} Lỗi liên tiếp: ${status.consecutiveErrors}${status.lastError ? ` (${status.lastError})` : ""}`,
         `${freshOk ? "🟢" : "🟡"} Scan gần nhất: ${ago(status.lastScanAt)}`,
       ];
@@ -164,8 +227,9 @@ async function onCommand(cmd, args) {
 }
 
 async function main() {
-  const net = await rpc.call((p) => p.getNetwork(), onRotate);
-  const latest = await rpc.getBlockNumber(onRotate);
+  let net = null;
+  try { net = await rpc.call((p) => p.getNetwork(), onRotate); } catch (_) {} // không chặn khởi động nếu RPC chết
+  const latest = await getTip(); // fallback Blockscout -> khởi động được cả khi mọi RPC chết
   status.lastBlock = latest;
   status.rpc = rpc.current;
   const safeTip = Math.max(0, latest - CONFIRMATIONS); // #5
@@ -179,38 +243,49 @@ async function main() {
   status.tokens = loadJson(TOKENS_FILE, []); // #10: khôi phục lịch sử token
   if (status.tokens.length) console.log(`Đã khôi phục ${status.tokens.length} token đã bắt trước đó.`);
 
-  // #3: nạp đủ mọi adapter của ví từ đầu chuỗi
-  try {
-    const all = await getLogsAdaptive({ topics: [T_ADAPTER, null, creatorTopic] }, 0, safeTip);
-    for (const l of all) {
-      status.adapters.add(iface.parseLog(l).args.adapter.toLowerCase());
-      if (l.blockNumber < status.cursor) alerted.add(key(l));
-    }
-    console.log(`Đã nạp ${status.adapters.size} adapter của ví (toàn lịch sử).`);
-  } catch (e) { console.log("Không nạp được adapter lịch sử:", e.message); }
+  // #3 + persistence: khôi phục adapter đã biết để KHỎI quét toàn lịch sử mỗi lần khởi động
+  // (giảm tải + hợp RPC giới hạn range như Alchemy free). Chỉ quét toàn chuỗi khi chưa có file.
+  const savedAdapters = loadJson(ADAPTERS_FILE, []);
+  if (Array.isArray(savedAdapters) && savedAdapters.length) {
+    for (const a of savedAdapters) status.adapters.add(String(a).toLowerCase());
+    console.log(`Đã khôi phục ${status.adapters.size} adapter từ ${ADAPTERS_FILE} (bỏ quét toàn lịch sử).`);
+  } else {
+    try {
+      const all = await getLogs({ topics: [T_ADAPTER, null, creatorTopic] }, 0, safeTip);
+      for (const l of all) {
+        status.adapters.add(iface.parseLog(l).args.adapter.toLowerCase());
+        if (l.blockNumber < status.cursor) alerted.add(key(l));
+      }
+      saveJson(ADAPTERS_FILE, [...status.adapters]);
+      console.log(`Đã nạp ${status.adapters.size} adapter của ví (toàn lịch sử).`);
+    } catch (e) { console.log("Không nạp được adapter lịch sử:", e.message); }
+  }
 
-  await alert(`🟢 Tracker (ws) khởi động — theo dõi ${WALLET}\n   RPC=${rpc.current} (+${RPC_URLS.length - 1} dự phòng, chainId ${net.chainId})\n   Đã biết ${status.adapters.size} adapter, quét từ block ${status.cursor}, confirmations=${CONFIRMATIONS}.`);
+  await alert(`🟢 Tracker (ws) khởi động — theo dõi ${WALLET}\n   RPC=${rpc.current} (+${RPC_URLS.length - 1} dự phòng, chainId ${net ? net.chainId : "?"})${net ? "" : " — ⚠️ mọi RPC lỗi lúc khởi động, đang chạy qua Blockscout dự phòng"}\n   Đã biết ${status.adapters.size} adapter, quét từ block ${status.cursor}, confirmations=${CONFIRMATIONS}.`);
 
   while (true) {
     try {
-      const tip = await rpc.getBlockNumber(onRotate);
+      const bsBefore = bsUseCount; // để suy ra chu kỳ này có phải dùng Blockscout dự phòng không
+      const tip = await getTip(); // fallback Blockscout khi mọi RPC chết
       status.lastBlock = tip;
       status.rpc = rpc.current;
       const to = tip - CONFIRMATIONS;
       if (to >= status.cursor) {
         const from = status.cursor;
 
-        const aLogs = await getLogsAdaptive({ topics: [T_ADAPTER, null, creatorTopic] }, from, to);
+        const aLogs = await getLogs({ topics: [T_ADAPTER, null, creatorTopic] }, from, to);
         for (const l of aLogs) {
           const a = iface.parseLog(l).args;
+          const isNew = !status.adapters.has(a.adapter.toLowerCase());
           status.adapters.add(a.adapter.toLowerCase());
+          if (isNew) saveJson(ADAPTERS_FILE, [...status.adapters]); // lưu ngay -> khỏi re-scan lịch sử
           const k = key(l);
           if (alerted.has(k)) continue;
           alerted.add(k);
           alert(`🆕 Adapter mới của ví\nadapter: <code>${a.adapter}</code>\nrouter: <code>${a.router}</code>\ntx: <code>${l.transactionHash}</code>`, { parseMode: "HTML" });
         }
 
-        const tLogs = await getLogsAdaptive({ address: PONS, topics: [T_LAUNCH] }, from, to);
+        const tLogs = await getLogs({ address: PONS, topics: [T_LAUNCH] }, from, to);
         for (const l of tLogs) {
           const a = iface.parseLog(l).args;
           if (!status.adapters.has(a.deployer.toLowerCase())) continue;
@@ -234,6 +309,16 @@ async function main() {
         try { fs.writeFileSync(WS_STATE, String(status.cursor)); } catch (_) {} // #2
       }
       status.lastScanAt = Date.now();
+
+      // 🟡/🟢 theo CHU KỲ: chu kỳ này có dùng Blockscout dự phòng không (tránh flap giữa 2 query)
+      const usedBs = bsUseCount > bsBefore;
+      if (usedBs && !status.onFallback) {
+        await alert("🟡 RPC lỗi hết — đang chạy qua Blockscout REST dự phòng (không mất coverage).");
+        status.onFallback = true;
+      } else if (!usedBs && status.onFallback) {
+        await alert("🟢 RPC đã phục hồi — thôi dùng Blockscout dự phòng.");
+        status.onFallback = false;
+      }
 
       if (status.downAlerted) {
         await alert(`🟢 Đã phục hồi — scan bình thường trở lại (sau ${status.consecutiveErrors} lỗi liên tiếp). RPC=${rpc.current}`);
@@ -264,4 +349,4 @@ if (require.main === module) {
   main().catch((e) => { console.error("Lỗi:", e.message); process.exit(1); });
 }
 
-module.exports = { onCommand, status, rpc, getLogsAdaptive, tokenSymbol, iface, T_ADAPTER, T_LAUNCH, creatorTopic, PONS, CONFIRMATIONS };
+module.exports = { onCommand, status, rpc, getLogsAdaptive, getLogs, getTip, isRangeError, tokenSymbol, iface, T_ADAPTER, T_LAUNCH, creatorTopic, PONS, CONFIRMATIONS };

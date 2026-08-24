@@ -9,8 +9,8 @@ node_modules/
 
 # State/artifact runtime
 ws_cursor.txt
-last_block.txt
 ws_tokens.json
-rest_tokens.json
+ws_adapters.json
+index_state.json
 *.tmp
 *.tmp.json

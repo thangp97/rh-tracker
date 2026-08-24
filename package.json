@@ -5,14 +5,19 @@
   "main": "track-ws.js",
   "scripts": {
     "ws": "node track-ws.js",
-    "rest": "node track-rest.js",
+    "index": "node track-index.js",
     "test:rpcs": "node test/test-rpcs.js",
     "test:telegram": "node test/test-telegram.js",
-    "test": "node test/test-commands.js && node test/test-persist.js && node test/test-outbox.js",
+    "test": "node test/test-commands.js && node test/test-persist.js && node test/test-outbox.js && node test/test-index-detect.js",
+    "test:fallback": "node test/test-blockscout-fallback.js",
+    "test:index": "node test/test-index-watchers.js",
     "backtest": "node test/backtest.js",
     "backtest:ws": "node test/backtest-fixes.js"
   },
   "dependencies": {
     "ethers": "^6.17.0"
+  },
+  "engines": {
+    "node": ">=20.12"
   }
 }

@@ -1,4 +1,5 @@
-// backtest.js — Kiểm chứng Cách B (REST getLogs) trên dữ liệu quá khứ đã biết đáp án.
+// backtest.js — Kiểm chứng nguồn Blockscout REST (getLogs) trên dữ liệu quá khứ đã biết đáp án.
+// (Blockscout nay là nguồn DỰ PHÒNG của track-ws khi mọi RPC chết.)
 // Chạy: node backtest.js
 // Node >= 18 (có fetch sẵn).
 
