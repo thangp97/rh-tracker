@@ -1,0 +1,16 @@
+# Bí mật — TUYỆT ĐỐI không commit
+.env
+
+# Phụ thuộc
+node_modules/
+
+# OMC (oh-my-claudecode) operational state — không thuộc dự án
+.omc/
+
+# State/artifact runtime
+ws_cursor.txt
+last_block.txt
+ws_tokens.json
+rest_tokens.json
+*.tmp
+*.tmp.json
