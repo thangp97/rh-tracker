@@ -13,6 +13,9 @@ const CANDIDATES = [
   ["arrowrpc-http", "https://rpc.arrowrpc.com"],
   ["arrowrpc-wss",  "wss://ws.arrowrpc.com"],
 ];
+// Thêm endpoint riêng để kiểm tra (không hardcode key): ALCHEMY_URL=<url> node test/test-rpcs.js
+if (process.env.ALCHEMY_URL) CANDIDATES.push(["alchemy", process.env.ALCHEMY_URL]);
+if (process.env.EXTRA_RPC) CANDIDATES.push(["extra", process.env.EXTRA_RPC]);
 
 function withTimeout(promise, ms) {
   return Promise.race([
@@ -32,10 +35,17 @@ async function testOne(name, url) {
     out.block = blk;
     out.pingMs = Date.now() - t0;
     const t1 = Date.now();
-    const logs = await withTimeout(
-      p.getLogs({ fromBlock: blk - 2000, toBlock: blk, topics: [T, null, creator] }), 10000);
-    out.getLogsMs = Date.now() - t1;
-    out.logs = logs.length;
+    try {
+      const logs = await withTimeout(
+        p.getLogs({ fromBlock: blk - 2000, toBlock: blk, topics: [T, null, creator] }), 10000);
+      out.getLogsMs = Date.now() - t1; out.logs = logs.length; out.getLogsRange = 2000;
+    } catch (e) {
+      // RPC có thể giới hạn range nhỏ (vd Alchemy free 10 block) -> thử lại range hẹp
+      const logs = await withTimeout(
+        p.getLogs({ fromBlock: blk - 8, toBlock: blk, topics: [T, null, creator] }), 10000);
+      out.getLogsMs = Date.now() - t1; out.logs = logs.length; out.getLogsRange = 8;
+      out.getLogsNote = "getLogs GIỚI HẠN range nhỏ (" + (e.error?.message || e.shortMessage || e.message || "").slice(0, 60) + ")";
+    }
     out.ok = out.chainId === 4663;
   } catch (e) {
     out.err = e.shortMessage || e.message;
@@ -54,7 +64,8 @@ async function testOne(name, url) {
   console.log("\n=== KẾT QUẢ ===");
   for (const r of results) {
     if (r.ok) {
-      console.log(`✅ ${r.name.padEnd(14)} chainId=${r.chainId} block=${r.block} ping=${r.pingMs}ms getLogs=${r.getLogsMs}ms (${r.logs} log)`);
+      const note = r.getLogsNote ? `  ⚠️ ${r.getLogsNote}` : "";
+      console.log(`✅ ${r.name.padEnd(14)} chainId=${r.chainId} block=${r.block} ping=${r.pingMs}ms getLogs=${r.getLogsMs}ms (${r.logs} log, range ${r.getLogsRange})${note}`);
     } else {
       console.log(`❌ ${r.name.padEnd(14)} ${r.err || "chainId sai=" + r.chainId}`);
     }

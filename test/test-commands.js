@@ -3,7 +3,7 @@
 const assert = require("assert");
 
 (async () => {
-  for (const modName of ["../track-ws", "../track-rest"]) {
+  for (const modName of ["../track-ws"]) {
     const m = require(modName);
     // bơm trạng thái giả
     m.status.startedAt = Date.now() - 3 * 3600 * 1000; // 3h uptime

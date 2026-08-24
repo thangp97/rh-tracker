@@ -7,13 +7,16 @@ báo Telegram ngay khi ví **deploy adapter** và khi **launch token** trên Pon
 
 ```
 rh-tracker/
-├── track-ws.js         # Cách C: ethers + RPC (khuyên dùng), cursor-poll + failover
-├── track-rest.js       # Cách B: poll REST Blockscout (không cần RPC node)
+├── track-ws.js         # Bot 1: theo dõi ví deploy/launch trên Pons (RPC failover + dự phòng Blockscout)
+├── track-index.js      # Bot 2: canh khi theindex TÍCH HỢP pools.trade + lưu token index launch
 ├── lib/
 │   ├── env.js          # nạp .env
 │   ├── guard.js        # bắt lỗi toàn cục (không chết âm thầm)
 │   ├── bot.js          # Telegram: gửi cảnh báo (retry, không mất tin) + lắng nghe lệnh
 │   ├── rpc.js          # nhiều RPC failover + auto-reconnect WebSocket
+│   ├── blockscout.js   # nguồn log DỰ PHÒNG độc lập (REST) khi mọi RPC chết
+│   ├── theindex.js     # (Bot 2) đọc trạng thái tích hợp từ theindex app.js + /api/assets
+│   ├── poolstrade.js   # (Bot 2) client tRPC của pools.trade (category/launchpad/launches)
 │   ├── store.js        # đọc/ghi JSON
 │   └── notify.js       # wrapper tương thích (-> bot.send)
 ├── test/               # backtest + unit test (xem phần Test)
@@ -35,7 +38,6 @@ nano .env               # điền TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
 ```bash
 node track-ws.js        # hoặc: npm run ws
-node track-rest.js      # hoặc: npm run rest
 ```
 
 Chạy 24/7 trên VPS bằng pm2:
@@ -47,16 +49,37 @@ pm2 logs rh-tracker
 
 ## Lệnh Telegram (gõ trong chat với bot)
 
-`/status` `/health` `/ping` `/tokens` `/adapters` `/help`
+Bot 1 (rh-tracker): `/status` `/health` `/ping` `/tokens` `/adapters` `/help`
+
+## Bot 2 — theindex ↔ pools.trade (`track-index.js`)
+
+Canh khi **theindex** (nền tảng index/stocks) tích hợp vào **pools.trade** (launchpad token trên Robinhood Chain), báo Telegram, và **lưu mọi token index** launch trên pools.trade.
+
+Hybrid 3 watcher — cảnh báo khi BẤT KỲ tín hiệu nào "dương" (so với **baseline cứng đã biết**):
+- **W1** — `theindex/app.js` (conditional-GET/ETag): `poolstrade` xuất hiện trong danh sách launchpad **tích hợp gốc** (hiện: `pons`, `letscash`; Pons đã tích hợp index).
+- **W2** — pools.trade tRPC: **category mới** (ngoài `volume/recency/linked-x/trending`) hoặc **launchpadId mới** (ngoài `uniswap-bonding-curve`, `uniswap-cca`).
+- **W3** — **on-chain**: bắt sự kiện `TokenLaunched` từ launcher pools.trade có **cặp ghép ∈ stock/index** (194 mã cổ phiếu + INDEX/PONS/CASHCAT) — bằng chứng chắc nhất; dùng RPC failover + dự phòng Blockscout của Bot 1, quét từ block 0 để bắt cả launch đã có.
+- Khi phát hiện tích hợp → mỗi chu kỳ **quét & lưu token index mới** (dedupe theo CA).
+
+```bash
+node track-index.js     # hoặc: npm run index
+```
+
+⚠️ **Cần Telegram bot token RIÊNG** cho Bot 2 (`INDEX_TELEGRAM_BOT_TOKEN` trong `.env`) — Telegram getUpdates độc quyền, không dùng chung token với Bot 1.
+
+Lệnh Bot 2: `/status` `/health` `/ping` `/watchers` `/assets` `/token` `/help`
+(`/token` liệt kê các token index đã launch trên pools.trade)
 
 ## Test
 
 ```bash
-node test/test-rpcs.js       # RPC nào còn sống + nhanh
+node test/test-rpcs.js       # RPC nào còn sống + nhanh (ALCHEMY_URL=<url> để test thêm endpoint)
 node test/test-telegram.js   # kênh cảnh báo OK chưa
-npm test                     # test-commands + test-persist + test-outbox
-node test/backtest.js        # kiểm chứng Cách B trên dữ liệu quá khứ
-node test/backtest-fixes.js  # kiểm chứng các fix của Cách C (cần RPC_URL)
+npm test                     # offline: test-commands + persist + outbox + index-detect
+npm run test:fallback        # bug#1 (không treo khi RPC chết) + fallback Blockscout (cần mạng)
+npm run test:index           # Bot 2: W1/W2 đọc đúng hiện trạng theindex/pools.trade (cần mạng)
+node test/backtest.js        # kiểm chứng nguồn Blockscout REST trên dữ liệu quá khứ
+node test/backtest-fixes.js  # kiểm chứng các fix của track-ws (cần RPC_URL)
 ```
 
 ## Cấu hình (.env)
@@ -74,5 +97,10 @@ node test/backtest-fixes.js  # kiểm chứng các fix của Cách C (cần RPC_
 ## Lưu ý vận hành
 
 - Mỗi bot token chỉ chạy **một** tracker (Telegram getUpdates độc quyền).
-- Chỉ dùng RPC uy tín (official + tenderly đã kiểm tra OK cho getLogs).
+- Chỉ dùng RPC uy tín (official + tenderly đã kiểm tra OK cho getLogs address-less).
+  - `publicnode` CHẶN getLogs address-less → không quét được adapter, đừng dùng.
+  - Alchemy free giới hạn getLogs 10 block/lần → chỉ hợp quét live, không hợp nạp lịch sử (cần PAYG).
+- **Dự phòng khi mọi RPC chết**: `track-ws.js` tự rơi xuống Blockscout REST (nguồn độc lập, không cần key)
+  để không bị "mù"; báo 🟡 khi chuyển dự phòng, 🟢 khi RPC phục hồi.
+- Adapter đã biết được lưu ở `ws_adapters.json` → khởi động lại **không** re-scan toàn lịch sử.
 - Tracker chỉ **đọc** on-chain — không đụng private key/giao dịch.
