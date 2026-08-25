@@ -13,8 +13,9 @@ require("./lib/env");
 require("./lib/guard"); // bắt lỗi toàn cục
 const fs = require("fs");
 const { ethers } = require("ethers");
-const { queueAlert, listen, escapeHtml } = require("./lib/bot");
+const { queueAlert, send, editMessage, listen, escapeHtml } = require("./lib/bot");
 const { Rpc, parseUrls } = require("./lib/rpc");
+const { startPush } = require("./lib/push");
 const { loadJson, saveJson } = require("./lib/store");
 const blockscout = require("./lib/blockscout"); // nguồn log dự phòng độc lập (REST)
 
@@ -44,6 +45,8 @@ const ERC20_SYMBOL = ["function symbol() view returns (string)"];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alert = queueAlert; // #11: không chặn vòng quét
 const alerted = new Set(); // #4
+const pending = new Map();         // 0-conf: key(tx:index) -> {kind, blockNumber, messageId, ...} (in-memory)
+const pendingAdapters = new Set(); // adapter 0-conf (chưa xác nhận) -> để lọc token push của ví
 const key = (l) => `${l.transactionHash}:${l.index}`;
 const onRotate = (r, e) => console.warn(`RPC rotate: ${r.from} -> ${r.to} (${e.shortMessage || e.message})`);
 
@@ -64,6 +67,8 @@ const status = {
   lastHeartbeatAt: Date.now(),
   downAlerted: false,
   onFallback: false, // đang chạy qua Blockscout dự phòng (mọi RPC chết) hay không
+  pushConnected: false, // websocket push 0-conf đang kết nối?
+  pendingCount: 0,      // số cảnh báo 0-conf đang chờ xác nhận
 };
 
 function ago(ts) {
@@ -167,6 +172,49 @@ async function tokenSymbol(addr) {
   } catch (_) { return null; }
 }
 
+// ---- Push 0-conf (báo sớm) — nguồn chân lý VẪN là vòng poll ----
+// Quyết định khi POLL xác nhận 1 event: 'edit' nếu đã có tin 0-conf; 'fresh' nếu chưa; null nếu đã báo.
+function resolveConfirm(k) {
+  if (alerted.has(k)) return null;
+  alerted.add(k);
+  const p = pending.get(k);
+  if (p) { pending.delete(k); status.pendingCount = pending.size; return { action: "edit", messageId: p.messageId }; }
+  return { action: "fresh" };
+}
+// Pending đã tới độ sâu xác nhận (block <= to) mà KHÔNG được confirmed -> reorg/rớt. Trả [[k,p],...].
+function collectReorged(to) {
+  const out = [];
+  for (const [k, p] of pending) if (to >= p.blockNumber) out.push([k, p]);
+  return out;
+}
+// Nhận 1 log từ websocket (0-conf): gửi thẻ ⚡ CHỜ XÁC NHẬN + ghi pending. Dedupe theo tx:index.
+async function onPush(log) {
+  try {
+    const k = key(log);
+    if (alerted.has(k) || pending.has(k)) return;
+    const t0 = log.topics[0];
+    if (t0 === T_ADAPTER) {
+      const a = iface.parseLog(log).args;
+      pendingAdapters.add(a.adapter.toLowerCase());
+      const mid = await send(
+        `⚡ Adapter mới của ví (0-conf — CHỜ XÁC NHẬN)\nadapter: <code>${a.adapter}</code>\nrouter: <code>${a.router}</code>\ntx: <code>${log.transactionHash}</code>`,
+        undefined, { parseMode: "HTML" });
+      pending.set(k, { kind: "adapter", blockNumber: log.blockNumber, messageId: mid || null, adapter: a.adapter, tx: log.transactionHash });
+      status.pendingCount = pending.size;
+    } else if (t0 === T_LAUNCH) {
+      const a = iface.parseLog(log).args;
+      const dep = a.deployer.toLowerCase();
+      if (!status.adapters.has(dep) && !pendingAdapters.has(dep)) return; // chỉ token của ví
+      const sym = await tokenSymbol(a.token);
+      const mid = await send(
+        `⚡ TOKEN MỚI (0-conf — CHỜ XÁC NHẬN)${sym ? " " + escapeHtml(sym) : ""}\nCA: <code>${a.token}</code>\ncurve: <code>${a.curve}</code>\ndeployer: <code>${a.deployer}</code>\ntx: <code>${log.transactionHash}</code>`,
+        undefined, { parseMode: "HTML" });
+      pending.set(k, { kind: "launch", blockNumber: log.blockNumber, messageId: mid || null, token: a.token, symbol: sym, curve: a.curve, deployer: a.deployer, tx: log.transactionHash });
+      status.pendingCount = pending.size;
+    }
+  } catch (e) { console.error("push err:", e.message); }
+}
+
 // ---- Bộ xử lý lệnh chat Telegram ----
 async function onCommand(cmd, args) {
   switch (cmd) {
@@ -180,6 +228,7 @@ async function onCommand(cmd, args) {
         `Đã quét tới: ${status.cursor != null ? status.cursor - 1 : "?"}`,
         `Adapter của ví: ${status.adapters.size}`,
         `Token đã bắt (từ lúc chạy): ${status.tokens.length}`,
+        `Push 0-conf: ${status.pushConnected ? "🟢 kết nối" : "⚪ tắt/mất"} | chờ xác nhận: ${status.pendingCount}`,
       ];
       const last = status.tokens[status.tokens.length - 1];
       if (last) L.push(`  • mới nhất: ${last.token}${last.symbol ? ` (${last.symbol})` : ""}`);
@@ -236,6 +285,24 @@ async function main() {
 
   listen(onCommand);
 
+  // ⚡ Push 0-conf (báo sớm) qua websocket — CHỈ tối ưu độ trễ; poll vẫn là nguồn chân lý.
+  // Cần 1 URL wss trong RPC_URLS (hoặc WS_URL). Không có -> tắt push, poll chạy như cũ.
+  const wsUrl = RPC_URLS.find((u) => /^wss?:/i.test(u)) || process.env.WS_URL || null;
+  if (wsUrl) {
+    startPush({
+      wsUrl,
+      filters: [
+        { topics: [T_ADAPTER, null, creatorTopic] },
+        { address: PONS, topics: [T_LAUNCH] },
+      ],
+      onEvent: onPush,
+      onStatus: (s) => { status.pushConnected = s === "connected"; if (s !== "connected") console.warn("push:", s); },
+    });
+    try { console.log("⚡ Push 0-conf bật qua", new URL(wsUrl).host); } catch (_) { console.log("⚡ Push 0-conf bật."); }
+  } else {
+    console.log("Push 0-conf TẮT (không có URL wss trong RPC_URLS/WS_URL) — chạy poll thường.");
+  }
+
   let saved = null;
   if (fs.existsSync(WS_STATE)) { const n = Number(fs.readFileSync(WS_STATE, "utf8")); if (Number.isFinite(n)) saved = n; }
   status.cursor = saved != null ? saved : safeTip; // #2
@@ -278,32 +345,44 @@ async function main() {
           const a = iface.parseLog(l).args;
           const isNew = !status.adapters.has(a.adapter.toLowerCase());
           status.adapters.add(a.adapter.toLowerCase());
+          pendingAdapters.delete(a.adapter.toLowerCase());
           if (isNew) saveJson(ADAPTERS_FILE, [...status.adapters]); // lưu ngay -> khỏi re-scan lịch sử
-          const k = key(l);
-          if (alerted.has(k)) continue;
-          alerted.add(k);
-          alert(`🆕 Adapter mới của ví\nadapter: <code>${a.adapter}</code>\nrouter: <code>${a.router}</code>\ntx: <code>${l.transactionHash}</code>`, { parseMode: "HTML" });
+          const c = resolveConfirm(key(l));
+          if (!c) continue;
+          const text = `🆕 Adapter mới của ví (đã xác nhận)\nadapter: <code>${a.adapter}</code>\nrouter: <code>${a.router}</code>\ntx: <code>${l.transactionHash}</code>`;
+          if (c.action === "edit" && c.messageId) editMessage(c.messageId, text, { parseMode: "HTML" }); // 0-conf -> ✅
+          else alert(text, { parseMode: "HTML" });
         }
 
         const tLogs = await getLogs({ address: PONS, topics: [T_LAUNCH] }, from, to);
         for (const l of tLogs) {
           const a = iface.parseLog(l).args;
           if (!status.adapters.has(a.deployer.toLowerCase())) continue;
-          const k = key(l);
-          if (alerted.has(k)) continue;
-          alerted.add(k);
+          const c = resolveConfirm(key(l));
+          if (!c) continue;
           const sym = await tokenSymbol(a.token); // #9
           status.tokens.push({ token: a.token, symbol: sym, curve: a.curve, tx: l.transactionHash, at: Date.now() });
           saveJson(TOKENS_FILE, status.tokens); // #10: lưu ngay khi bắt được
-          alert(
-            `✅ TOKEN MỚI${sym ? " " + escapeHtml(sym) : ""}\n` +
+          const text =
+            `✅ TOKEN MỚI (đã xác nhận)${sym ? " " + escapeHtml(sym) : ""}\n` +
             `CA: <code>${a.token}</code>\n` +      // chạm để copy
             `curve: <code>${a.curve}</code>\n` +
             `deployer: <code>${a.deployer}</code>\n` +
-            `tx: <code>${l.transactionHash}</code>`,
-            { parseMode: "HTML" }
-          );
+            `tx: <code>${l.transactionHash}</code>`;
+          if (c.action === "edit" && c.messageId) editMessage(c.messageId, text, { parseMode: "HTML" }); // 0-conf -> ✅
+          else alert(text, { parseMode: "HTML" });
         }
+
+        // Reorg/rớt: pending 0-conf đã tới độ sâu xác nhận (block <= to) mà KHÔNG confirmed -> báo huỷ.
+        for (const [k, p] of collectReorged(to)) {
+          pending.delete(k);
+          if (p.kind === "adapter" && p.adapter) pendingAdapters.delete(p.adapter.toLowerCase());
+          const text = p.kind === "launch"
+            ? `⚠️ Token 0-conf BIẾN MẤT (reorg?) — không lên chain ở độ sâu xác nhận.\nCA: <code>${p.token}</code>\ntx: <code>${p.tx}</code>`
+            : `⚠️ Adapter 0-conf BIẾN MẤT (reorg?)\nadapter: <code>${p.adapter}</code>\ntx: <code>${p.tx}</code>`;
+          if (p.messageId) editMessage(p.messageId, text, { parseMode: "HTML" });
+        }
+        status.pendingCount = pending.size;
 
         status.cursor = to + 1;
         try { fs.writeFileSync(WS_STATE, String(status.cursor)); } catch (_) {} // #2
@@ -349,4 +428,4 @@ if (require.main === module) {
   main().catch((e) => { console.error("Lỗi:", e.message); process.exit(1); });
 }
 
-module.exports = { onCommand, status, rpc, getLogsAdaptive, getLogs, getTip, isRangeError, tokenSymbol, iface, T_ADAPTER, T_LAUNCH, creatorTopic, PONS, CONFIRMATIONS };
+module.exports = { onCommand, status, rpc, getLogsAdaptive, getLogs, getTip, isRangeError, tokenSymbol, iface, T_ADAPTER, T_LAUNCH, creatorTopic, PONS, CONFIRMATIONS, alerted, pending, pendingAdapters, resolveConfirm, collectReorged, onPush };

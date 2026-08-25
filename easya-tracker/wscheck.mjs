@@ -3,17 +3,17 @@
 // Chạy:  node wscheck.mjs [program|all] [giây]     (mặc định: DBC program, 30s)
 import "./env.mjs";
 import { Connection, PublicKey } from "@solana/web3.js";
+import { parseProviders, maskUrl } from "./providers.mjs";
 import { DBC_PROGRAM, LAUNCH_MARKERS } from "./dbc.mjs";
 
-const key = process.env.HELIUS_API_KEY || "";
-if (!key) { console.error("Thiếu HELIUS_API_KEY trong .env"); process.exit(1); }
+const providers = parseProviders();
+if (!providers.length) { console.error("Thiếu endpoint (đặt HELIUS_API_KEY hoặc SOLANA_RPC_URLS trong .env)"); process.exit(1); }
 
 const arg = process.argv[2] || DBC_PROGRAM;
 const secs = Number(process.argv[3] || 30);
-const conn = new Connection(`https://mainnet.helius-rpc.com/?api-key=${key}`, {
-  commitment: "confirmed",
-  wsEndpoint: `wss://mainnet.helius-rpc.com/?api-key=${key}`,
-});
+const p = providers[0]; // kiểm endpoint đầu tiên
+console.log(`Endpoint: ${maskUrl(p.http)}`);
+const conn = new Connection(p.http, { commitment: "confirmed", wsEndpoint: p.ws });
 
 let n = 0, launches = 0;
 const sample = [];

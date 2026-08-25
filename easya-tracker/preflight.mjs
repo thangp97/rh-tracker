@@ -2,21 +2,27 @@
 // Chạy: node preflight.mjs  (cần .env đã điền). In ✅/❌ từng mục, gửi 1 tin thử vào Telegram.
 import "./env.mjs";
 import { Connection } from "@solana/web3.js";
+import { parseProviders, maskUrl } from "./providers.mjs";
 
-const key = process.env.HELIUS_API_KEY || "";
 const BOT = process.env.TELEGRAM_BOT_TOKEN || "";
 const CHAT = process.env.TELEGRAM_CHAT_ID || "";
 let ok = true;
 
-// 1) Helius RPC (getSlot + version)
-if (!key) { console.log("❌ HELIUS_API_KEY: thiếu"); ok = false; }
+// 1) RPC — kiểm TỪNG endpoint (getSlot + version). Cần ít nhất 1 cái OK.
+const providers = parseProviders();
+if (!providers.length) { console.log("❌ RPC: thiếu endpoint (đặt HELIUS_API_KEY hoặc SOLANA_RPC_URLS)"); ok = false; }
 else {
-  try {
-    const conn = new Connection(`https://mainnet.helius-rpc.com/?api-key=${key}`, { commitment: "confirmed" });
-    const slot = await conn.getSlot("confirmed");
-    const v = await conn.getVersion();
-    console.log(`✅ Helius RPC: OK (slot ${slot}, solana-core ${v["solana-core"]})`);
-  } catch (e) { console.log("❌ Helius RPC: LỖI —", e.message); ok = false; }
+  let anyOk = false;
+  for (const p of providers) {
+    try {
+      const conn = new Connection(p.http, { commitment: "confirmed" });
+      const slot = await conn.getSlot("confirmed");
+      const v = await conn.getVersion();
+      console.log(`✅ RPC ${maskUrl(p.http)}: OK (slot ${slot}, solana-core ${v["solana-core"]})`);
+      anyOk = true;
+    } catch (e) { console.log(`❌ RPC ${maskUrl(p.http)}: LỖI — ${e.message}`); }
+  }
+  if (!anyOk) ok = false;
 }
 
 // 2) Telegram token hợp lệ? (getMe)

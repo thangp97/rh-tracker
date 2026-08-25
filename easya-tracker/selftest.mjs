@@ -4,6 +4,7 @@ import assert from "node:assert";
 import { PublicKey } from "@solana/web3.js";
 import { base58Decode, parseMetadataBytes, computeBuy, parseLaunch, WSOL, DBC_PROGRAM, METADATA_PROG } from "./dbc.mjs";
 import { formatCard, formatEnriched } from "./telegram.mjs";
+import { parseProviders, maskUrl } from "./providers.mjs";
 
 // (1) base58Decode phải khớp web3.js PublicKey.toBytes() (gồm cả trường hợp byte-0 dẫn đầu).
 for (const b58 of [WSOL, "DD3y1mi4yeQSLNbNGZTxUwdwbEm4Gh2injjx1N9HPCqQ", "11111111111111111111111111111111"]) {
@@ -96,6 +97,19 @@ assert.ok(tks.includes("MINTxxx") && tks.includes("TST"), "/tokens thiếu token
 assert.ok((await idx.onCommand("/help")).includes("/status"), "/help thiếu danh sách");
 assert.strictEqual(await idx.onCommand("/khong-co"), null, "lệnh lạ phải trả null (im lặng)");
 console.log("✅ (6) lệnh chat: /ping /status /tokens /help + lệnh lạ trả null");
+
+// (7) parseProviders + maskUrl: HELIUS_API_KEY -> 1 endpoint (ws suy ra); SOLANA_RPC_URLS -> nhiều; che key.
+const one = parseProviders({ HELIUS_API_KEY: "abc" });
+assert.strictEqual(one.length, 1);
+assert.strictEqual(one[0].http, "https://mainnet.helius-rpc.com/?api-key=abc");
+assert.strictEqual(one[0].ws, "wss://mainnet.helius-rpc.com/?api-key=abc");
+const many = parseProviders({ SOLANA_RPC_URLS: "https://a.co/?api-key=1, https://b.co , http://c.co" });
+assert.strictEqual(many.length, 3, "phải parse 3 endpoint");
+assert.strictEqual(many[0].ws, "wss://a.co/?api-key=1");
+assert.strictEqual(many[2].ws, "ws://c.co", "http -> ws");
+assert.strictEqual(parseProviders({}).length, 0, "không cấu hình -> rỗng");
+assert.strictEqual(maskUrl("https://x.co/?api-key=SECRET123&z=1"), "https://x.co/?api-key=***&z=1", "phải che key");
+console.log("✅ (7) parseProviders (HELIUS_API_KEY/SOLANA_RPC_URLS, suy ws) + maskUrl che key");
 
 console.log("\n✅ TẤT CẢ SELFTEST ĐẠT.");
 

@@ -56,6 +56,11 @@ pm2 logs rh-tracker
 
 Bot 1 (rh-tracker): `/status` `/health` `/ping` `/tokens` `/adapters` `/help`
 
+**Push 0-conf (báo sớm 2 nấc)** — nếu `RPC_URLS` có 1 URL `wss://` (hoặc đặt `WS_URL`), Bot 1 mở `eth_subscribe`
+và gửi thẻ **⚡ CHỜ XÁC NHẬN** ngay khi thấy sự kiện, rồi vòng poll **edit** chính thẻ đó thành **✅ đã xác nhận**
+(hoặc **⚠️ reorg** nếu sự kiện biến mất ở độ sâu xác nhận). Push chỉ tối ưu độ trễ; **poll vẫn là nguồn chân lý**
+(cursor + failover + dự phòng Blockscout + giữ `CONFIRMATIONS`). Không có `wss://` → tự tắt push, poll chạy như cũ.
+
 ## Bot 2 — theindex ↔ pools.trade (`track-index.js`)
 
 Canh khi **theindex** (nền tảng index/stocks) tích hợp vào **pools.trade** (launchpad token trên Robinhood Chain), báo Telegram, và **lưu mọi token index** launch trên pools.trade.
