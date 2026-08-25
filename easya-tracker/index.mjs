@@ -360,7 +360,14 @@ process.on("exit", () => {
 });
 
 // Chỉ chạy bot khi file này là entry point; khi bị import (test) thì KHÔNG chạy main.
-const isMain = import.meta.url === pathToFileURL(process.argv[1] || "").href;
+// LƯU Ý pm2 + ESM: pm2 nạp .mjs qua wrapper fork (ProcessContainerFork) nên process.argv[1] là
+// đường dẫn wrapper của pm2, KHÔNG phải index.mjs -> phép so argv[1] fail -> main() không chạy
+// (bot "sống mà câm": 0 log, 0 kết nối, không /status). Nhận thêm trường hợp pm2 qua env pm_exec_path.
+// (Khi selftest import module này: cả argv[1] lẫn pm_exec_path đều không trỏ index.mjs -> main() KHÔNG chạy.)
+const thisFile = fileURLToPath(import.meta.url);
+const isMain =
+  import.meta.url === pathToFileURL(process.argv[1] || "").href ||  // node index.mjs (chạy trực tiếp)
+  process.env.pm_exec_path === thisFile;                            // pm2 fork wrapper
 if (isMain) main().catch((e) => { console.error("Lỗi khởi động:", e.message); process.exit(1); });
 
 export { onCommand, status, recent };
