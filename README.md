@@ -56,6 +56,10 @@ pm2 logs rh-tracker
 
 Bot 1 (rh-tracker): `/status` `/health` `/ping` `/tokens` `/adapters` `/help`
 
+**Thẻ token làm giàu** — khi bắt được token, thẻ hiển thị tên + `$SYMBOL`, **Supply / Holders**, **MCap / Giá / Vol24h**
+(nếu Blockscout có), và **Top 10 holder kèm % nắm giữ** (📄 = contract), cộng link Blockscout. Nguồn: `lib/tokenmeta.js`
+(Blockscout token API + `/holders`). Lưu ý: **X/Twitter & website KHÔNG có on-chain** nên chưa nhúng (cần API pools.trade/Pons).
+
 **Push 0-conf (báo sớm 2 nấc)** — nếu `RPC_URLS` có 1 URL `wss://` (hoặc đặt `WS_URL`), Bot 1 mở `eth_subscribe`
 và gửi thẻ **⚡ CHỜ XÁC NHẬN** ngay khi thấy sự kiện, rồi vòng poll **edit** chính thẻ đó thành **✅ đã xác nhận**
 (hoặc **⚠️ reorg** nếu sự kiện biến mất ở độ sâu xác nhận). Push chỉ tối ưu độ trễ; **poll vẫn là nguồn chân lý**

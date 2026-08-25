@@ -23,6 +23,7 @@ const { loadJson, saveJson } = require("./lib/store");
 const theindex = require("./lib/theindex");
 const poolstrade = require("./lib/poolstrade");
 const onchain = require("./lib/poolstrade-onchain"); // W3
+const tokenmeta = require("./lib/tokenmeta"); // làm giàu thẻ: name/supply/market/top-holder qua Blockscout
 
 const POLL_MS = Number(process.env.INDEX_POLL_MS || 60000); // tích hợp là sự kiện hiếm -> 60s là đủ
 const STATE_FILE = "./index_state.json";
@@ -105,6 +106,7 @@ function saveState() {
 }
 
 // Lưu 1 token index (dedupe chung theo CA cho W2 & W3). Trả true nếu MỚI.
+// Dedupe + push ĐỒNG BỘ (không bỏ sót/không trùng); gửi thẻ giàu ở NỀN (không chặn vòng quét).
 function recordToken(rec, via) {
   const key = String(rec.tokenAddress || "").toLowerCase();
   if (!key || foundKeys.has(key)) return false;
@@ -113,16 +115,29 @@ function recordToken(rec, via) {
     tokenAddress: rec.tokenAddress, tokenSymbol: rec.tokenSymbol, tokenName: rec.tokenName,
     launchpadId: rec.launchpadId, pair: rec.pair, via, at: Date.now(),
   });
+  sendIndexCard(rec, via).catch(() => {});
+  return true;
+}
+
+// Gửi thẻ token index, làm giàu bằng Blockscout (name/supply/market + top-10 holder %). Best-effort.
+async function sendIndexCard(rec, via) {
+  let meta = null, holders = [];
+  try { meta = await tokenmeta.getTokenInfo(rec.tokenAddress); } catch (_) {}
+  try { if (meta) holders = await tokenmeta.getTopHolders(rec.tokenAddress, meta.totalSupplyRaw, 10); } catch (_) {}
+  const name = rec.tokenName || (meta && meta.name);
+  const sym = rec.tokenSymbol || (meta && meta.symbol);
+  const nameLine = name
+    ? `\n${escapeHtml(String(name))}${sym ? " ($" + escapeHtml(String(sym)) + ")" : ""}`
+    : (sym ? `\n$${escapeHtml(String(sym))}` : "");
+  const enrich = tokenmeta.renderEnrichment(meta, holders, escapeHtml);
   alert(
-    `✅ TOKEN INDEX trên pools.trade (${escapeHtml(via)})\n` +
+    `✅ TOKEN INDEX trên pools.trade (${escapeHtml(via)})${nameLine}\n` +
     `CA: <code>${rec.tokenAddress}</code>\n` +
-    `${rec.tokenSymbol ? "symbol: " + escapeHtml(String(rec.tokenSymbol)) + "\n" : ""}` +
-    `${rec.tokenName ? "tên: " + escapeHtml(String(rec.tokenName)) + "\n" : ""}` +
     `${rec.pair ? "ghép cặp: <code>" + rec.pair + "</code>\n" : ""}` +
-    `${POOLSTRADE_URL}/t/${rec.tokenAddress}`,
+    (enrich ? enrich + "\n" : "") +
+    `🔗 <a href="${tokenmeta.explorerToken(rec.tokenAddress)}">Blockscout</a> · <a href="${POOLSTRADE_URL}/t/${rec.tokenAddress}">pools.trade</a>`,
     { parseMode: "HTML" }
   );
-  return true;
 }
 
 function markIntegration(reason) {

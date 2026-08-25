@@ -51,6 +51,7 @@ Không dùng framework. `main()` trong mỗi bot là vòng lặp `while (true)` 
 - `rpc.js` — class `Rpc`: nhiều endpoint RPC có failover; lỗi thì xoay sang endpoint kế, và tạo lại provider WebSocket đã chết. `parseUrls` đọc `RPC_URLS` (cách nhau dấu phẩy, ưu tiên) hoặc `RPC_URL`.
 - `blockscout.js` — nguồn log REST **độc lập** (không cần node, không cần key). Chuẩn hoá log REST về đúng shape ethers-log để `iface.parseLog()` và khoá dedupe `tx:index` dùng lại được nguyên. Chia nhỏ range và chia đôi khi chạm cap ~1000 log (Blockscout cắt im lặng).
 - `store.js` — đọc/ghi JSON best-effort (lỗi → fallback/bỏ qua).
+- `tokenmeta.js` — làm giàu thẻ token (cả 2 bot EVM): `name/symbol/decimals/totalSupply` + market cap/giá/volume/holders qua **Blockscout token API**, và **top-10 holder + %** (tính bằng BigInt) qua `/api/v2/tokens/{ca}/holders`. Best-effort (Blockscout lỗi → gửi thẻ trơn). Socials (X/website) **không có** on-chain lẫn Blockscout (`contractURI`/`tokenURI` revert) — muốn thì phải lấy từ pools.trade/Pons. `renderEnrichment` bỏ qua trường null. Logic thuần test offline ở `test/test-tokenmeta.js`.
 - Chỉ Bot 2: `theindex.js` (trích danh sách launchpad từ bundle `app.js` của theindex, cache theo ETag; đọc `/api/assets`), `poolstrade.js` (client tRPC của pools.trade), `poolstrade-onchain.js` (bộ quét on-chain W3).
 - `notify.js` — shim tương thích ngược → `bot.send`.
 
