@@ -12,5 +12,8 @@ ws_cursor.txt
 ws_tokens.json
 ws_adapters.json
 index_state.json
+# easya-tracker (Solana) runtime state
+easya-tracker/recent.json
+easya-tracker/easya.lock
 *.tmp
 *.tmp.json
