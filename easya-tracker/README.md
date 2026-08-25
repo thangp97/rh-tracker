@@ -67,13 +67,18 @@ Bot lắng nghe lệnh Telegram (long-poll `getUpdates`, chỉ nhận từ `TELE
 
 > ⚠️ `getUpdates` độc quyền theo token → bot này phải dùng **Telegram token RIÊNG** (khác 2 bot EVM ở gốc), nếu không sẽ lỗi 409.
 
-## Vận hành
+## Vận hành & độ bền
 
-- Chạy dưới supervisor tự-restart (đã thêm app `easya-tracker` vào `../ecosystem.config.js` cho pm2). Một
-  websocket cho mỗi Helius key.
+- Chạy dưới supervisor tự-restart (đã thêm app `easya-tracker` vào `../ecosystem.config.js` cho pm2).
+- **Failover nhiều endpoint** (chống điểm chết đơn Helius): đặt `SOLANA_RPC_URLS` (nhiều URL, cách nhau dấu phẩy)
+  thay cho — hoặc cùng với — `HELIUS_API_KEY`.
+  - **RPC**: `getParsedTransaction`/`getBalance`/`getSlot` thử lần lượt các endpoint (`providers.mjs` → `Pool.call`).
+  - **Websocket**: `onSlotChange` là "nhịp tim" (bắn ~2/s khi ws sống → phát hiện ws chết ngay cả khi EasyA im).
+    Im lặng > 45s → **xoay endpoint + re-subscribe**; vẫn im sau nhiều nhịp → thoát cho supervisor restart.
+- **Telegram không mất tin**: cảnh báo nền (startup/heartbeat/trạng thái) đi qua hàng đợi `queueAlert` — lỗi tạm
+  thời (429/5xx/mạng) thì giữ tin và thử lại (backoff), không rớt. Thẻ launch dùng `send()` có retry (giữ `message_id`).
 - **1 instance duy nhất**: lockfile `easya.lock` (ghi pid; từ chối chạy nếu lock còn tươi < 45s) để 2 bản không
   gửi trùng. Dedupe sự kiện theo signature.
-- Watchdog: nếu slot không tiến ~3 phút (ws có thể chết) → thoát để supervisor restart.
 
 ## Muốn nhanh hơn (dưới 1s)
 

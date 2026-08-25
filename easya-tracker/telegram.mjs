@@ -16,30 +16,77 @@ export function escapeHtml(s) {
 // Chỉ cho phép http(s) trong href (twitter/website đến từ JSON off-chain KHÔNG tin cậy).
 function safeUrl(u) { return typeof u === "string" && /^https?:\/\//i.test(u) ? u : null; }
 
-async function call(method, body) {
-  const r = await fetch(API(method), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ disable_web_page_preview: true, parse_mode: "HTML", ...body }),
-  });
-  const j = await r.json().catch(() => null);
-  if (!j || !j.ok) throw new Error(`Telegram ${method}: ${j?.description || r.status}`);
-  return j.result;
+// Gửi 1 lần. Trả {ok,messageId} | {skip} (chưa cấu hình) | {retryAfter} (429) | {permanent}
+// (4xx: token/chat sai -> đừng thử lại) | {} (5xx/mạng: tạm thời -> thử lại).
+async function sendOnce(method, body) {
+  if (!configured()) return { skip: true };
+  try {
+    const r = await fetch(API(method), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ disable_web_page_preview: true, parse_mode: "HTML", ...body }),
+    });
+    if (r.ok) { const j = await r.json().catch(() => null); return { ok: true, messageId: j?.result?.message_id ?? null }; }
+    let desc = "", retryAfter = 0;
+    try { const j = await r.json(); desc = j.description || ""; retryAfter = j.parameters?.retry_after || 0; } catch (_) {}
+    if (r.status === 429) return { retryAfter: retryAfter || 1 };
+    if (r.status >= 400 && r.status < 500) { console.error("Telegram lỗi vĩnh viễn (bỏ tin):", r.status, desc); return { permanent: true }; }
+    console.error("Telegram lỗi tạm (sẽ thử lại):", r.status, desc);
+    return {};
+  } catch (e) { console.error("Telegram lỗi mạng (sẽ thử lại):", e.message); return {}; }
 }
 
-// send -> trả message_id (hoặc null nếu chưa cấu hình / lỗi). KHÔNG ném (không làm hỏng handler).
+// send CHẶN có retry (429/5xx/mạng) -> trả message_id (cần cho thẻ + edit/reply). null nếu hỏng hẳn.
 export async function send(text, extra = {}) {
   if (!configured()) { console.log("[telegram chưa cấu hình]\n" + text); return null; }
-  try { const res = await call("sendMessage", { chat_id: chat(), text, ...extra }); return res.message_id; }
-  catch (e) { console.error("send lỗi:", e.message); return null; }
+  const body = { chat_id: chat(), text, ...extra };
+  for (let i = 0; i < 5; i++) {
+    const res = await sendOnce("sendMessage", body);
+    if (res.ok) return res.messageId;
+    if (res.skip || res.permanent) return null;
+    await sleep(res.retryAfter ? res.retryAfter * 1000 : 500 * (i + 1));
+  }
+  return null;
 }
 export async function edit(messageId, text, extra = {}) {
   if (!configured() || !messageId) return false;
-  try { await call("editMessageText", { chat_id: chat(), message_id: messageId, text, ...extra }); return true; }
-  catch (e) { console.error("edit lỗi:", e.message); return false; }
+  const body = { chat_id: chat(), message_id: messageId, text, ...extra };
+  for (let i = 0; i < 3; i++) {
+    const res = await sendOnce("editMessageText", body);
+    if (res.ok) return true;
+    if (res.skip || res.permanent) return false;
+    await sleep(res.retryAfter ? res.retryAfter * 1000 : 500 * (i + 1));
+  }
+  return false;
 }
 export async function reply(messageId, text, extra = {}) {
   return send(text, messageId ? { reply_to_message_id: messageId, ...extra } : extra);
+}
+
+// Hàng đợi gửi NỀN (không chặn caller, KHÔNG mất tin khi Telegram lỗi tạm): giữ tin ở đầu hàng,
+// thử lại theo backoff. Dùng cho cảnh báo nền (startup/heartbeat/lỗi) — thứ tự được giữ nguyên.
+const outbox = [];
+let sending = false;
+async function drain() {
+  if (sending) return;
+  sending = true;
+  while (outbox.length) {
+    const j = outbox[0];
+    const res = await sendOnce("sendMessage", { chat_id: chat(), text: j.text, ...j.extra });
+    if (res.ok || res.skip || res.permanent) { outbox.shift(); continue; }
+    j.tries = (j.tries || 0) + 1;
+    const wait = res.retryAfter ? res.retryAfter * 1000 : Math.min(60000, 1000 * 2 ** Math.min(j.tries, 6));
+    sending = false;
+    setTimeout(() => drain().catch(() => {}), wait);
+    return;
+  }
+  sending = false;
+}
+export function queueAlert(text, extra = {}) {
+  console.log(text);
+  outbox.push({ text, extra });
+  drain().catch(() => {});
+  return true;
 }
 
 // Lắng nghe lệnh chat qua long-poll getUpdates. CHỈ nhận tin từ TELEGRAM_CHAT_ID.
