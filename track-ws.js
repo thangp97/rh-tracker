@@ -189,6 +189,8 @@ function collectReorged(to) {
   return out;
 }
 // Nhận 1 log từ websocket (0-conf): gửi thẻ ⚡ CHỜ XÁC NHẬN + ghi pending. Dedupe theo tx:index.
+// Bất biến chống race: ghi `pending` (giữ chỗ) ĐỒNG BỘ ngay sau guard, TRƯỚC mọi await — để nếu vòng
+// poll xác nhận log này trong lúc đang await thì thấy pending -> không tạo thẻ trùng / không reorg nhầm.
 async function onPush(log) {
   try {
     const k = key(log);
@@ -197,23 +199,47 @@ async function onPush(log) {
     if (t0 === T_ADAPTER) {
       const a = iface.parseLog(log).args;
       pendingAdapters.add(a.adapter.toLowerCase());
+      pending.set(k, { kind: "adapter", blockNumber: log.blockNumber, messageId: null, adapter: a.adapter, tx: log.transactionHash });
+      status.pendingCount = pending.size;
       const mid = await send(
         `⚡ Adapter mới của ví (0-conf — CHỜ XÁC NHẬN)\nadapter: <code>${a.adapter}</code>\nrouter: <code>${a.router}</code>\ntx: <code>${log.transactionHash}</code>`,
         undefined, { parseMode: "HTML" });
-      pending.set(k, { kind: "adapter", blockNumber: log.blockNumber, messageId: mid || null, adapter: a.adapter, tx: log.transactionHash });
-      status.pendingCount = pending.size;
+      const p = pending.get(k); if (p) p.messageId = (typeof mid === "number") ? mid : null; // chỉ lưu id là SỐ
     } else if (t0 === T_LAUNCH) {
       const a = iface.parseLog(log).args;
       const dep = a.deployer.toLowerCase();
       if (!status.adapters.has(dep) && !pendingAdapters.has(dep)) return; // chỉ token của ví
+      pending.set(k, { kind: "launch", blockNumber: log.blockNumber, messageId: null, token: a.token, symbol: null, curve: a.curve, deployer: a.deployer, tx: log.transactionHash });
+      status.pendingCount = pending.size;
       const sym = await tokenSymbol(a.token);
+      const p0 = pending.get(k); if (p0) p0.symbol = sym;
       const mid = await send(
         `⚡ TOKEN MỚI (0-conf — CHỜ XÁC NHẬN)${sym ? " " + escapeHtml(sym) : ""}\nCA: <code>${a.token}</code>\ncurve: <code>${a.curve}</code>\ndeployer: <code>${a.deployer}</code>\ntx: <code>${log.transactionHash}</code>`,
         undefined, { parseMode: "HTML" });
-      pending.set(k, { kind: "launch", blockNumber: log.blockNumber, messageId: mid || null, token: a.token, symbol: sym, curve: a.curve, deployer: a.deployer, tx: log.transactionHash });
-      status.pendingCount = pending.size;
+      const p = pending.get(k); if (p) p.messageId = (typeof mid === "number") ? mid : null;
     }
   } catch (e) { console.error("push err:", e.message); }
+}
+
+// Làm giàu thẻ token đã xác nhận bằng Blockscout (name/supply/market + top-10 holder %) rồi EDIT.
+// Chạy ở NỀN (không await trong vòng poll) — Blockscout chậm/404 không chặn nguồn chân lý.
+async function enrichAndEdit(messageId, token, sym, curve, deployer, tx) {
+  let meta = null, holders = [];
+  try { meta = await tokenmeta.getTokenInfo(token); } catch (_) {}
+  try { if (meta) holders = await tokenmeta.getTopHolders(token, meta.totalSupplyRaw, 10); } catch (_) {}
+  if (!meta && !holders.length) return; // không có gì thêm -> khỏi edit
+  const nameLine = (meta && meta.name)
+    ? `\n${escapeHtml(meta.name)}${sym ? " ($" + escapeHtml(sym) + ")" : ""}`
+    : (sym ? `\n$${escapeHtml(sym)}` : "");
+  const enrich = tokenmeta.renderEnrichment(meta, holders, escapeHtml);
+  const text =
+    `✅ TOKEN MỚI (đã xác nhận)${nameLine}\n` +
+    `CA: <code>${token}</code>\n` +
+    `curve: <code>${curve}</code>\n` +
+    `deployer: <code>${deployer}</code>\n` +
+    (enrich ? enrich + "\n" : "") +
+    `🔗 <a href="${tokenmeta.explorerToken(token)}">Blockscout</a> · tx <code>${tx}</code>`;
+  await editMessage(messageId, text, { parseMode: "HTML" });
 }
 
 // ---- Bộ xử lý lệnh chat Telegram ----
@@ -358,29 +384,25 @@ async function main() {
         const tLogs = await getLogs({ address: PONS, topics: [T_LAUNCH] }, from, to);
         for (const l of tLogs) {
           const a = iface.parseLog(l).args;
-          if (!status.adapters.has(a.deployer.toLowerCase())) continue;
+          // Xử lý nếu adapter ĐÃ xác nhận HOẶC ta đã gửi ⚡ 0-conf cho log này (pending) — nếu đã gửi ⚡ thì
+          // BẮT BUỘC resolve (confirm) để không bị collectReorged báo "⚠️ reorg" nhầm cho token thật.
+          if (!status.adapters.has(a.deployer.toLowerCase()) && !pending.has(key(l))) continue;
           const c = resolveConfirm(key(l));
           if (!c) continue;
-          // làm giàu bằng Blockscout (best-effort): name/supply/market + top-10 holder %
-          let meta = null, holders = [];
-          try { meta = await tokenmeta.getTokenInfo(a.token); } catch (_) {}
-          try { if (meta) holders = await tokenmeta.getTopHolders(a.token, meta.totalSupplyRaw, 10); } catch (_) {}
-          const sym = (meta && meta.symbol) || await tokenSymbol(a.token); // Blockscout trước, fallback on-chain
+          const sym = await tokenSymbol(a.token); // on-chain, nhanh (KHÔNG gọi Blockscout ở đây)
           status.tokens.push({ token: a.token, symbol: sym, curve: a.curve, tx: l.transactionHash, at: Date.now() });
           saveJson(TOKENS_FILE, status.tokens); // #10: lưu ngay khi bắt được
-          const nameLine = (meta && meta.name)
-            ? `\n${escapeHtml(meta.name)}${sym ? " ($" + escapeHtml(sym) + ")" : ""}`
-            : (sym ? `\n$${escapeHtml(sym)}` : "");
-          const enrich = tokenmeta.renderEnrichment(meta, holders, escapeHtml);
-          const text =
-            `✅ TOKEN MỚI (đã xác nhận)${nameLine}\n` +
+          // Thẻ "trơn" NHANH (không chặn vòng poll), lấy message_id để làm giàu bằng edit ở nền.
+          const leanText =
+            `✅ TOKEN MỚI (đã xác nhận)${sym ? " $" + escapeHtml(sym) : ""}\n` +
             `CA: <code>${a.token}</code>\n` +      // chạm để copy
             `curve: <code>${a.curve}</code>\n` +
             `deployer: <code>${a.deployer}</code>\n` +
-            (enrich ? enrich + "\n" : "") +
             `🔗 <a href="${tokenmeta.explorerToken(a.token)}">Blockscout</a> · tx <code>${l.transactionHash}</code>`;
-          if (c.action === "edit" && c.messageId) editMessage(c.messageId, text, { parseMode: "HTML" }); // 0-conf -> ✅
-          else alert(text, { parseMode: "HTML" });
+          let mid = null;
+          if (c.action === "edit" && c.messageId) { editMessage(c.messageId, leanText, { parseMode: "HTML" }); mid = c.messageId; } // 0-conf -> ✅
+          else { const r = await send(leanText, undefined, { parseMode: "HTML" }); if (typeof r === "number") mid = r; else if (r === false) alert(leanText, { parseMode: "HTML" }); }
+          if (mid) enrichAndEdit(mid, a.token, sym, a.curve, a.deployer, l.transactionHash).catch(() => {}); // NỀN
         }
 
         // Reorg/rớt: pending 0-conf đã tới độ sâu xác nhận (block <= to) mà KHÔNG confirmed -> báo huỷ.

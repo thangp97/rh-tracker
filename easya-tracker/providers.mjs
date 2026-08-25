@@ -10,7 +10,13 @@ export function parseProviders(env = process.env) {
   let http = [];
   if (raw) http = raw.split(",").map((s) => s.trim()).filter(Boolean);
   else if (env.HELIUS_API_KEY) http = [`https://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`];
-  return http.map((u) => ({ http: u, ws: u.replace(/^http/i, "ws") })); // https->wss, http->ws
+  // Chỉ nhận URL có scheme http(s):// — thiếu scheme thì .replace(/^http/) không khớp -> ws sai/hỏng.
+  const valid = http.filter((u) => {
+    if (/^https?:\/\//i.test(u)) return true;
+    console.error("Bỏ endpoint thiếu scheme http(s)://:", maskUrl(u));
+    return false;
+  });
+  return valid.map((u) => ({ http: u, ws: u.replace(/^http/i, "ws") })); // https->wss, http->ws
 }
 
 // Che api-key khi log/cảnh báo.
@@ -31,13 +37,17 @@ export class Pool {
   rotate() { this.i = (this.i + 1) % this.conns.length; this.rotations++; return this.current; }
 
   // Thử fn(conn) lần lượt trên các endpoint (bắt đầu từ endpoint hiện tại); trả kết quả đầu OK,
-  // hoặc ném lỗi cuối nếu MỌI endpoint đều lỗi trong một lượt.
+  // hoặc ném lỗi cuối nếu MỌI endpoint đều lỗi trong một lượt. Dùng chỉ số CỤC BỘ (snapshot `this.i`)
+  // để hai call đồng thời không đua nhau xoay `this.i` -> không bỏ sót endpoint khoẻ.
   async call(fn) {
     let last;
+    const start = this.i;
     for (let k = 0; k < this.conns.length; k++) {
-      try { return await fn(this.conns[this.i]); }
-      catch (e) { last = e; this.rotate(); }
+      const idx = (start + k) % this.conns.length;
+      try { const r = await fn(this.conns[idx]); this.i = idx; return r; } // ghim endpoint khoẻ làm hiện tại
+      catch (e) { last = e; }
     }
+    this.rotate(); // cả lượt đều lỗi -> xoay để lần sau bắt đầu từ endpoint khác
     throw last;
   }
 }

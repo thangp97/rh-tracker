@@ -18,7 +18,7 @@ require("./lib/env");
 if (process.env.INDEX_TELEGRAM_BOT_TOKEN) process.env.TELEGRAM_BOT_TOKEN = process.env.INDEX_TELEGRAM_BOT_TOKEN;
 if (process.env.INDEX_TELEGRAM_CHAT_ID) process.env.TELEGRAM_CHAT_ID = process.env.INDEX_TELEGRAM_CHAT_ID;
 require("./lib/guard"); // bắt lỗi toàn cục
-const { queueAlert, send, listen, escapeHtml } = require("./lib/bot");
+const { queueAlert, send, editMessage, listen, escapeHtml } = require("./lib/bot");
 const { loadJson, saveJson } = require("./lib/store");
 const theindex = require("./lib/theindex");
 const poolstrade = require("./lib/poolstrade");
@@ -26,6 +26,8 @@ const onchain = require("./lib/poolstrade-onchain"); // W3
 const tokenmeta = require("./lib/tokenmeta"); // làm giàu thẻ: name/supply/market/top-holder qua Blockscout
 
 const POLL_MS = Number(process.env.INDEX_POLL_MS || 60000); // tích hợp là sự kiện hiếm -> 60s là đủ
+// Sau khi ĐÃ tích hợp: giãn W1/W2 (canh tích hợp) xuống mức này để nhẹ tải; W3 + scanIndexTokens vẫn 60s.
+const W12_SLOW_MS = Number(process.env.INDEX_W12_SLOW_MS || 600000); // mặc định 10 phút
 const STATE_FILE = "./index_state.json";
 const HEARTBEAT_MS = Number(process.env.HEARTBEAT_HOURS || 6) * 3600 * 1000;
 const ERR_THRESHOLD = Number(process.env.ERROR_ALERT_THRESHOLD || 3);
@@ -50,6 +52,7 @@ const status = {
   lastErrorAt: null,
   downAlerted: false,
   integrationDetected: false,
+  w12LastAt: 0, // lần chạy W1/W2 gần nhất (để giãn sau khi tích hợp)
   w1: { nativeLaunchpads: [], poolstradeNative: false, parserOk: null, at: null },
   w2: { categories: [], launchpadIds: [], at: null },
   w3: { cursor: null, tip: null, lastLaunches: 0, at: null, err: null, stockCount: 0 },
@@ -119,25 +122,31 @@ function recordToken(rec, via) {
   return true;
 }
 
-// Gửi thẻ token index, làm giàu bằng Blockscout (name/supply/market + top-10 holder %). Best-effort.
-async function sendIndexCard(rec, via) {
-  let meta = null, holders = [];
-  try { meta = await tokenmeta.getTokenInfo(rec.tokenAddress); } catch (_) {}
-  try { if (meta) holders = await tokenmeta.getTopHolders(rec.tokenAddress, meta.totalSupplyRaw, 10); } catch (_) {}
+// Dựng thẻ token index (meta/holders có thể null -> thẻ "trơn").
+function buildIndexCard(rec, via, meta, holders) {
   const name = rec.tokenName || (meta && meta.name);
   const sym = rec.tokenSymbol || (meta && meta.symbol);
   const nameLine = name
     ? `\n${escapeHtml(String(name))}${sym ? " ($" + escapeHtml(String(sym)) + ")" : ""}`
     : (sym ? `\n$${escapeHtml(String(sym))}` : "");
   const enrich = tokenmeta.renderEnrichment(meta, holders, escapeHtml);
-  alert(
-    `✅ TOKEN INDEX trên pools.trade (${escapeHtml(via)})${nameLine}\n` +
+  return `✅ TOKEN INDEX trên pools.trade (${escapeHtml(via)})${nameLine}\n` +
     `CA: <code>${rec.tokenAddress}</code>\n` +
     `${rec.pair ? "ghép cặp: <code>" + rec.pair + "</code>\n" : ""}` +
     (enrich ? enrich + "\n" : "") +
-    `🔗 <a href="${tokenmeta.explorerToken(rec.tokenAddress)}">Blockscout</a> · <a href="${POOLSTRADE_URL}/t/${rec.tokenAddress}">pools.trade</a>`,
-    { parseMode: "HTML" }
-  );
+    `🔗 <a href="${tokenmeta.explorerToken(rec.tokenAddress)}">Blockscout</a> · <a href="${POOLSTRADE_URL}/t/${rec.tokenAddress}">pools.trade</a>`;
+}
+
+// Gửi thẻ token index: gửi "trơn" NGAY (không để Blockscout chậm/404 chặn hay làm mất thẻ), rồi làm giàu bằng edit.
+async function sendIndexCard(rec, via) {
+  const lean = buildIndexCard(rec, via, null, []);
+  const mid = await send(lean, undefined, { parseMode: "HTML" }); // trả message_id (số) | true | false
+  if (mid === false) { alert(lean, { parseMode: "HTML" }); return; } // send hỏng hẳn -> outbox không mất tin
+  if (typeof mid !== "number") return;                              // gửi OK nhưng không có id -> khỏi edit
+  let meta = null, holders = [];
+  try { meta = await tokenmeta.getTokenInfo(rec.tokenAddress); } catch (_) {}
+  try { if (meta) holders = await tokenmeta.getTopHolders(rec.tokenAddress, meta.totalSupplyRaw, 10); } catch (_) {}
+  if (meta || holders.length) await editMessage(mid, buildIndexCard(rec, via, meta, holders), { parseMode: "HTML" });
 }
 
 function markIntegration(reason) {
@@ -351,10 +360,16 @@ async function main() {
 
   while (true) {
     try {
-      await runW1();
-      await runW2();
-      await scanIndexTokens();
-      try { await runW3(); } catch (e) { status.w3.err = e.message; console.error("W3 err:", e.message); } // W3 lỗi không làm hỏng W1/W2
+      // W1/W2 (canh tích hợp): mỗi chu kỳ TRƯỚC khi tích hợp; SAU tích hợp giãn còn W12_SLOW_MS (nhẹ tải).
+      // Chu kỳ đầu luôn chạy (w12LastAt=0) kể cả khi tích hợp đã lưu từ trạng thái -> status.w2 luôn được nạp.
+      const dueW12 = !status.integrationDetected || (Date.now() - status.w12LastAt >= W12_SLOW_MS);
+      if (dueW12) {
+        await runW1();
+        await runW2();
+        status.w12LastAt = Date.now();
+      }
+      await scanIndexTokens();  // LUÔN mỗi chu kỳ (nguồn API bổ sung — bắt token nhanh, dùng status.w2 gần nhất)
+      try { await runW3(); } catch (e) { status.w3.err = e.message; console.error("W3 err:", e.message); } // W3 (nguồn chính) — LUÔN mỗi chu kỳ
       saveState();
       status.lastScanAt = Date.now();
       if (status.downAlerted) {

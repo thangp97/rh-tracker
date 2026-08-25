@@ -67,8 +67,12 @@ export async function reply(messageId, text, extra = {}) {
 // thử lại theo backoff. Dùng cho cảnh báo nền (startup/heartbeat/lỗi) — thứ tự được giữ nguyên.
 const outbox = [];
 let sending = false;
+let nextDrainAt = 0;   // không gửi trước mốc này (tôn trọng retry_after/backoff kể cả khi có queueAlert mới)
+let drainTimer = null; // 1 timer duy nhất -> tránh chồng timer
 async function drain() {
   if (sending) return;
+  const now = Date.now();
+  if (now < nextDrainAt) { if (!drainTimer) drainTimer = setTimeout(() => { drainTimer = null; drain().catch(() => {}); }, nextDrainAt - now); return; }
   sending = true;
   while (outbox.length) {
     const j = outbox[0];
@@ -76,8 +80,9 @@ async function drain() {
     if (res.ok || res.skip || res.permanent) { outbox.shift(); continue; }
     j.tries = (j.tries || 0) + 1;
     const wait = res.retryAfter ? res.retryAfter * 1000 : Math.min(60000, 1000 * 2 ** Math.min(j.tries, 6));
+    nextDrainAt = Date.now() + wait;
     sending = false;
-    setTimeout(() => drain().catch(() => {}), wait);
+    if (!drainTimer) drainTimer = setTimeout(() => { drainTimer = null; drain().catch(() => {}); }, wait);
     return;
   }
   sending = false;
@@ -123,6 +128,10 @@ export async function listen(onCommand) {
       } else if (j.error_code === 409) {
         console.error("getUpdates 409 (bot khác đang chạy cùng token) — chờ…");
         await sleep(5000);
+      } else {
+        // lỗi API khác (401 token sai / 400...) trả tức thì -> PHẢI sleep, không sẽ busy-loop ngốn CPU + spam Telegram.
+        console.error("getUpdates lỗi API:", j.error_code, j.description || "");
+        await sleep(3000);
       }
     } catch (_) { await sleep(3000); }
   }
@@ -158,7 +167,7 @@ export function formatCard(d, devBalanceSol) {
 export function formatEnriched(d, devBalanceSol, s = {}) {
   const base = formatCard(d, devBalanceSol);
   const extra = [];
-  if (s.description) extra.push("", escapeHtml(String(s.description)).slice(0, 300));
+  if (s.description) extra.push("", escapeHtml(String(s.description).slice(0, 300))); // slice TRƯỚC escape (không cắt đứt &amp;)
   const soc = [];
   const tw = safeUrl(s.twitter), web = safeUrl(s.website);
   if (tw) soc.push(`<a href="${tw}">Twitter</a>`);
