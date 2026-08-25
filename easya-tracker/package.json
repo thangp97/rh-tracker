@@ -1,0 +1,21 @@
+{
+  "name": "easya-tracker",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "EasyA/Kickstart (Meteora DBC) Solana token-launch tracker -> Telegram",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node selftest.mjs",
+    "preflight": "node preflight.mjs",
+    "wscheck": "node wscheck.mjs",
+    "replay": "node replay.mjs"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.3",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

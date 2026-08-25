@@ -24,5 +24,17 @@ module.exports = {
       max_memory_restart: "300M",
       time: true,
     },
+    {
+      // Bot 3 — EasyA/Kickstart (Solana, Meteora DBC). Sub-project ESM riêng trong easya-tracker/.
+      // Cần .env RIÊNG trong easya-tracker/ (HELIUS_API_KEY + TELEGRAM_*). Chạy `npm install` trong đó trước.
+      name: "easya-tracker",
+      script: "index.mjs",
+      cwd: __dirname + "/easya-tracker",
+      autorestart: true,
+      max_restarts: 100,
+      restart_delay: 5000,
+      max_memory_restart: "300M",
+      time: true,
+    },
   ],
 };

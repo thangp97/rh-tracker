@@ -3,6 +3,9 @@
 Theo dõi ví `0x3d58E42d3a920dE4C1F71EE041c7eBb82ee23f49` trên Robinhood Chain (chainId 4663):
 báo Telegram ngay khi ví **deploy adapter** và khi **launch token** trên Pons v2.
 
+Repo còn có **Bot 3 — `easya-tracker/`**: theo dõi token launch trên **EasyA/Kickstart** (Solana, Meteora DBC).
+Đây là sub-project ESM **độc lập**, ngăn xếp khác hẳn 2 bot EVM (xem mục *Bot 3* và `easya-tracker/README.md`).
+
 ## Cấu trúc
 
 ```
@@ -17,11 +20,13 @@ rh-tracker/
 │   ├── blockscout.js   # nguồn log DỰ PHÒNG độc lập (REST) khi mọi RPC chết
 │   ├── theindex.js     # (Bot 2) đọc trạng thái tích hợp từ theindex app.js + /api/assets
 │   ├── poolstrade.js   # (Bot 2) client tRPC của pools.trade (category/launchpad/launches)
+│   ├── poolstrade-onchain.js # (Bot 2 W3) bắt launch pools.trade on-chain (ghép cặp stock/index)
 │   ├── store.js        # đọc/ghi JSON
 │   └── notify.js       # wrapper tương thích (-> bot.send)
 ├── test/               # backtest + unit test (xem phần Test)
-├── ecosystem.config.js # cấu hình pm2 chạy 24/7
-├── .env.example        # mẫu cấu hình
+├── easya-tracker/      # Bot 3 (Solana): track launch EasyA/Kickstart — sub-project ESM riêng (README riêng)
+├── ecosystem.config.js # cấu hình pm2 chạy 24/7 (cả 3 bot)
+├── .env.example        # mẫu cấu hình (Bot 1/2; Bot 3 dùng easya-tracker/.env riêng)
 └── .gitignore
 ```
 
@@ -69,6 +74,31 @@ node track-index.js     # hoặc: npm run index
 
 Lệnh Bot 2: `/status` `/health` `/ping` `/watchers` `/assets` `/token` `/help`
 (`/token` liệt kê các token index đã launch trên pools.trade)
+
+## Bot 3 — EasyA/Kickstart launch tracker (Solana) — `easya-tracker/`
+
+Sub-project **độc lập**, stack khác hẳn 2 bot trên: **Solana + ESM + `@solana/web3.js` + Helius**
+(không dùng `ethers`/`lib/` gốc). Nghe on-chain thời gian thực, báo Telegram ngay khi có token mới tạo
+trên launchpad **EasyA/Kickstart** (chạy trên **Meteora Dynamic Bonding Curve**): tên, symbol, mint,
+ví dev + số dư SOL, dev mua bao nhiêu SOL (+ % supply), socials, link. Bonus: phát hiện **khoá token qua
+Streamflow** rồi reply vào thẻ gốc.
+
+Có `package.json` + `node_modules` **riêng** → cài & chạy TRONG thư mục con:
+
+```bash
+cd easya-tracker
+npm install
+cp .env.example .env      # điền HELIUS_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (token RIÊNG)
+npm test                  # selftest offline (không cần mạng/secret)
+node preflight.mjs        # kiểm Helius RPC + kênh Telegram
+node wscheck.mjs          # kiểm websocket nhận push (commitment=confirmed)
+npm start                 # chạy thật
+```
+
+Lệnh Bot 3: `/status` `/health` `/ping` `/tokens` `/help` + heartbeat 💓.
+Chi tiết đầy đủ (cách phát hiện launch, công cụ verify, hướng nâng cấp sub-second): **`easya-tracker/README.md`**.
+
+⚠️ Bot 3 **phải dùng Telegram token RIÊNG** (khác Bot 1/2) — `getUpdates` độc quyền, chung token sẽ lỗi 409.
 
 ## Test
 
