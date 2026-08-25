@@ -1,7 +1,7 @@
 // index.mjs — bot theo dõi token launch trên EasyA/Kickstart (Meteora DBC, Solana) -> cảnh báo Telegram.
 //
 // Luồng:
-//   1) logsSubscribe (mentions = EASYA_CONFIG, commitment "confirmed") -> lọc marker launch -> dedupe theo sig.
+//   1) logsSubscribe (mentions = EASYA_COSIGNER — bền qua khi EasyA đổi config; commitment "confirmed") -> lọc marker launch -> dedupe theo sig.
 //   2) getParsedTransaction (retry ~8x/300ms, FAILOVER nhiều endpoint) -> parseLaunch -> gửi thẻ NGAY + getBalance(dev).
 //   3) NỀN: fetchSocials (đua IPFS gateway) -> editMessageText làm giàu thẻ (không chặn đường tới hạn).
 //   4) logsSubscribe thứ 2 (Streamflow) -> nếu lock đúng mint đã launch -> reply "🔒 LOCK".
@@ -18,7 +18,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PublicKey } from "@solana/web3.js";
 import { parseProviders, maskUrl, Pool } from "./providers.mjs";
-import { EASYA_CONFIG, STREAMFLOW, LAUNCH_MARKERS, parseLaunch } from "./dbc.mjs";
+import { EASYA_COSIGNER, STREAMFLOW, LAUNCH_MARKERS, parseLaunch } from "./dbc.mjs";
 import { fetchSocials } from "./socials.mjs";
 import { send, edit, reply, queueAlert, listen, formatCard, formatEnriched, escapeHtml, configured } from "./telegram.mjs";
 import { isLockLogs, lockedMint } from "./streamflow.mjs";
@@ -34,6 +34,10 @@ const WATCHDOG_MS = 20000;                 // nhịp kiểm liveness
 const WS_SILENT_MS = 45000;                // ws im lặng lâu hơn ngần này -> coi là chết (slot ~2/s nên rất an toàn)
 const WS_STALL_EXIT = 5;                    // số nhịp im lặng liên tiếp (sau khi đã xoay) trước khi thoát cho supervisor
 const FORCE_RESUB_MS = Number(process.env.EASYA_RESUB_MS || 1800000); // 30 phút: re-subscribe ĐỊNH KỲ (ws sống nhưng logsSubscribe có thể bị drop âm thầm)
+
+// Địa chỉ để mentions-filter launch. Mặc định = co-signer EasyA (ký mọi launch, bền qua khi EasyA
+// đổi config). Nếu EasyA đổi cả ví co-signer sau này -> chỉ cần đặt EASYA_WATCH trong .env, KHÔNG cần sửa code.
+const LAUNCH_FILTER = (process.env.EASYA_WATCH || EASYA_COSIGNER).trim();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -202,7 +206,7 @@ let sub = null;      // { conn, launchId, lockId, slotId }
 let lastSubAt = 0;   // lần (re)subscribe gần nhất — để re-subscribe ĐỊNH KỲ chống Helius drop logsSubscribe âm thầm
 async function subscribe() {
   const c = pool.conn();
-  const launchId = await c.onLogs(new PublicKey(EASYA_CONFIG), (l) => {
+  const launchId = await c.onLogs(new PublicKey(LAUNCH_FILTER), (l) => {
     if (l.err) return;
     runHandler(handleLaunch, l.signature, l.logs || [], "launch");
   }, "confirmed");
@@ -295,7 +299,7 @@ async function main() {
   await subscribe(); // logsSubscribe (launch + lock) + onSlotChange trên endpoint hiện tại
 
   queueAlert(`🟢 EasyA tracker khởi động — canh launch trên Kickstart/Meteora DBC (confirmed), ${pool.size} endpoint failover.`);
-  console.log(`Đang lắng nghe launch (EasyA config) + lock (Streamflow) trên ${maskUrl(pool.current)}…`);
+  console.log(`Đang lắng nghe launch (EasyA co-signer ${LAUNCH_FILTER.slice(0, 8)}…) + lock (Streamflow) trên ${maskUrl(pool.current)}…`);
 
   // Giữ lock tươi + prune recent + prune seen (chống rò rỉ bộ nhớ 24/7).
   setInterval(touchLock, 20000);

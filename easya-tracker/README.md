@@ -37,7 +37,7 @@ npm start                    # 5) CHẠY THẬT: thấy "🟢 khởi động"; n
 
 ## Cách phát hiện launch
 
-1. Mở websocket Helius, `logsSubscribe` với **mentions filter = EasyA config**.
+1. Mở websocket Helius, `logsSubscribe` với **mentions filter = co-signer EasyA** (`HtrbuJZV…`, ký mọi launch và KHÔNG đổi khi EasyA đổi config → bền qua migration; override qua `EASYA_WATCH` trong `.env`).
 2. **Commitment PHẢI `confirmed`** — KHÔNG dùng `processed` (Helius giao im lặng ở processed → mất launch).
 3. Chỉ giữ log chứa marker `InitializeVirtualPoolWithSplToken` / `InitializeVirtualPoolWithToken2022` (bỏ swap/spam).
 4. Dedupe theo signature.

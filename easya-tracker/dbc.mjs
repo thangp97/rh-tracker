@@ -2,7 +2,10 @@
 // Mọi ID chương trình đều CÔNG KHAI (nhìn thấy trên Solscan), KHÔNG phải bí mật.
 
 export const DBC_PROGRAM    = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN"; // Meteora Dynamic Bonding Curve
-export const EASYA_CONFIG   = "DD3y1mi4yeQSLNbNGZTxUwdwbEm4Gh2injjx1N9HPCqQ"; // "danh tính" launchpad EasyA/Kickstart (mentions filter)
+// Config account launchpad EasyA (accounts[0] của DBC init). EasyA ĐÃ ĐỔI config ~2026-08-25:
+// cũ = DD3y1mi4…HPCqQ (đã ngừng), mới = 72JMqxS3…Pb6yW. parseLaunch đọc config ĐỘNG từ accounts[0]
+// nên hằng này chỉ để THAM CHIẾU — KHÔNG dùng làm mentions filter (đổi config là hỏng âm thầm).
+export const EASYA_CONFIG   = "72JMqxS3By9FGsWSxgheZ97GKs5ky4wsHcu66KxPb6yW";  // config hiện tại (tham chiếu)
 export const POOL_AUTHORITY = "FhVo3mqL8PW5pH5U2CN4XE33DokiyZnUwuGpH2hmHLuM"; // PDA pool authority (accounts[1])
 export const METADATA_PROG  = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"; // mpl-token-metadata
 export const TOKEN_PROG     = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"; // SPL Token
@@ -10,9 +13,11 @@ export const TOKEN2022_PROG = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"; // 
 export const WSOL           = "So11111111111111111111111111111111111111112";
 export const STREAMFLOW     = "strmRqUCoQUgGUan5YhzUZa6KqdzwX5L6FpUxfmKg5m"; // program khoá token (lock)
 
-// Phụ trợ (chỉ để tham chiếu/đối chiếu thêm — không bắt buộc):
-export const EASYA_MEMO     = "easya-kickstart";                              // memo trong tx launch EasyA
-export const EASYA_COSIGNER = "HtrbuJZV5K6FTbrMCxuWXoeEC1V5NwsqiToXtqtZVtxQ"; // ví co-signer của EasyA
+// Co-signer EasyA — ký MỌI tx launch EasyA và KHÔNG đổi khi EasyA đổi config -> dùng làm
+// MENTIONS FILTER cho logsSubscribe (bền qua migration config). Kiểm 2026-08-25: 100% launch
+// trong mẫu đều có ví này, và nó chỉ đi ký launch (không swap) -> ít nhiễu hơn lọc theo config.
+export const EASYA_COSIGNER = "HtrbuJZV5K6FTbrMCxuWXoeEC1V5NwsqiToXtqtZVtxQ";
+export const EASYA_MEMO     = "easya-kickstart";                              // memo trong tx launch EasyA (tham chiếu)
 
 // Marker trong logs để CHỈ giữ sự kiện launch (bỏ swap và spam khác).
 export const LAUNCH_MARKERS = ["InitializeVirtualPoolWithSplToken", "InitializeVirtualPoolWithToken2022"];
