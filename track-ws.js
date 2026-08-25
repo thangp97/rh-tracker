@@ -18,6 +18,7 @@ const { Rpc, parseUrls } = require("./lib/rpc");
 const { startPush } = require("./lib/push");
 const { loadJson, saveJson } = require("./lib/store");
 const blockscout = require("./lib/blockscout"); // nguồn log dự phòng độc lập (REST)
+const tokenmeta = require("./lib/tokenmeta"); // làm giàu thẻ: name/supply/market/top-holder qua Blockscout
 
 const WALLET = "0x3d58E42d3a920dE4C1F71EE041c7eBb82ee23f49";
 const PONS = "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e"; // PonsV2LaunchFactory
@@ -360,15 +361,24 @@ async function main() {
           if (!status.adapters.has(a.deployer.toLowerCase())) continue;
           const c = resolveConfirm(key(l));
           if (!c) continue;
-          const sym = await tokenSymbol(a.token); // #9
+          // làm giàu bằng Blockscout (best-effort): name/supply/market + top-10 holder %
+          let meta = null, holders = [];
+          try { meta = await tokenmeta.getTokenInfo(a.token); } catch (_) {}
+          try { if (meta) holders = await tokenmeta.getTopHolders(a.token, meta.totalSupplyRaw, 10); } catch (_) {}
+          const sym = (meta && meta.symbol) || await tokenSymbol(a.token); // Blockscout trước, fallback on-chain
           status.tokens.push({ token: a.token, symbol: sym, curve: a.curve, tx: l.transactionHash, at: Date.now() });
           saveJson(TOKENS_FILE, status.tokens); // #10: lưu ngay khi bắt được
+          const nameLine = (meta && meta.name)
+            ? `\n${escapeHtml(meta.name)}${sym ? " ($" + escapeHtml(sym) + ")" : ""}`
+            : (sym ? `\n$${escapeHtml(sym)}` : "");
+          const enrich = tokenmeta.renderEnrichment(meta, holders, escapeHtml);
           const text =
-            `✅ TOKEN MỚI (đã xác nhận)${sym ? " " + escapeHtml(sym) : ""}\n` +
+            `✅ TOKEN MỚI (đã xác nhận)${nameLine}\n` +
             `CA: <code>${a.token}</code>\n` +      // chạm để copy
             `curve: <code>${a.curve}</code>\n` +
             `deployer: <code>${a.deployer}</code>\n` +
-            `tx: <code>${l.transactionHash}</code>`;
+            (enrich ? enrich + "\n" : "") +
+            `🔗 <a href="${tokenmeta.explorerToken(a.token)}">Blockscout</a> · tx <code>${l.transactionHash}</code>`;
           if (c.action === "edit" && c.messageId) editMessage(c.messageId, text, { parseMode: "HTML" }); // 0-conf -> ✅
           else alert(text, { parseMode: "HTML" });
         }
